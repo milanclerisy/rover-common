@@ -46,9 +46,7 @@ module SNT
         # @return [Boolean]
         #
         def publish!(msg, options = {})
-          if defined?(::OpenTracing) && ::OpenTracing.current_trace_object
-            msg = JSON.parse(msg).merge(headers: ::OpenTracing.current_trace_object).to_json
-          end
+          msg = inject_trace_headers(msg)
           broadcast(msg, options)
 
           # We must rescue all exceptions, so an issue with queuing system does not degrade the rest of the app
@@ -64,9 +62,7 @@ module SNT
         # @return [Boolean]
         #
         def publish(msg, options = {})
-          if defined?(::OpenTracing) && ::OpenTracing.current_trace_object
-            msg = JSON.parse(msg).merge(headers: ::OpenTracing.current_trace_object).to_json
-          end
+          msg = inject_trace_headers(msg)
           broadcast(msg, options)
 
           true
@@ -159,6 +155,37 @@ module SNT
 
           ::Thread.current[:bunny_channel] = nil
           ::SNT::Core::MQ.reconnect!
+        end
+
+        # Merges trace headers into the JSON message body under the `headers:` key.
+        # Returns the original msg unchanged when no active span is available.
+        def inject_trace_headers(msg)
+          headers = current_trace_headers
+          return msg if headers.nil? || headers.empty?
+
+          JSON.parse(msg).merge(headers: headers).to_json
+        end
+
+        # Prefers OpenTelemetry when present and the current span is valid; otherwise
+        # falls back to the legacy OpenTracing hash so PMS behavior is unchanged.
+        def current_trace_headers
+          if defined?(::OpenTelemetry)
+            span = ::OpenTelemetry::Trace.current_span
+            if span && span.context.valid?
+              trace_id = span.context.hex_trace_id
+              span_id = span.context.hex_span_id
+              return {
+                'snt-traceparent' => "#{trace_id}-#{span_id}-",
+                'traceparent' => "00-#{trace_id}-#{span_id}-01"
+              }
+            end
+          end
+
+          if defined?(::OpenTracing) && ::OpenTracing.respond_to?(:current_trace_object)
+            return ::OpenTracing.current_trace_object
+          end
+
+          nil
         end
       end
     end
